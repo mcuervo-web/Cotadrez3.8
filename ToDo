@@ -1,2 +1,2 @@
-* Revisar la comprobación de asedio, parece que no siempre la detecta bien.
-* En la mecánica de intercambio de rehenes comprobar que haya tropas que intercambiar, porque si la fortaleza no tiene tropas en la Reserva no se puede continuar el juego.
+* Revisar la comprobación de asedio, parece que no siempre la detecta bien. HECHO.
+* En la mecánica de intercambio de rehenes comprobar que haya tropas que intercambiar, porque si la fortaleza no tiene tropas en la Reserva no se puede continuar el juego. HECHO.
