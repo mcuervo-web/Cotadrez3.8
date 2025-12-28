@@ -89,8 +89,68 @@ Ganas la partida si:
 
 ---
 
-Entendido. Aquí tienes la traducción completa al inglés, manteniendo exactamente el mismo formato Markdown, negritas y estructura que me has pasado.
+### 📝 SISTEMA DE NOTACIÓN COTADREZ (SNC 1.3)
 
+**Coordenadas:** **a-j** (Columnas) / **1-10** (Filas).
+**Formato:** `Pieza` + `Destino`. (Origen omitido si no hay ambigüedad).
+
+#### 1. FASES DE LA PARTIDA (Control de Tiempo)
+
+* **`rF` + `Casilla**` : **Definición de Partida.** El primer movimiento *siempre* es colocar la Fortaleza. Esto define el color y territorio del jugador.
+* **`//`** : **Cambio de Despliegue.** Indica el fin del despliegue del Jugador 1 y el inicio del Jugador 2.
+* **`>>>`** : **Inicio de Combate (START).** Fin del despliegue. Se levanta la niebla y empieza el juego real.
+
+> **Ejemplo de Inicio:**
+> `1. rFe2 ... // 1... rFe9 ... >>> 1. Cd4`
+
+#### 2. LAS PIEZAS (Letras Mayúsculas)
+
+* **A**: Arquero
+* **B**: Ballesta (Escorpión)
+* **C**: Caballería Ligera
+* **D**: Dragón
+* **E**: Elefante
+* **F**: Fortaleza
+* **H**: cHusma
+* **L**: Lancero
+* **M**: Montaña
+* **P**: Caballería Pesada
+* **R**: Rey
+* **T**: Trabuquete
+
+#### 3. SÍMBOLOS DE ACCIÓN
+
+* **=** : Intercambio de Lanceros (*Ej: `L=Rd5*`).
+* **x** : Captura / Disparo (*Ej: `Rxe2*`, `Txf9`).
+* **&** : Marcha Forzada (Chusma) (*Ej: `Hd3 & Hg8*`).
+* **+** : Jaque.
+* **#** : Jaque Mate.
+
+#### 4. PREFIJOS DE ORIGEN
+
+* **r** : De Reserva a Tablero (Despliegue/Sacrificio). *Ej: `rLe5*`.
+* **m** : De Mazmorra a Reserva (Rescate). *Ej: `mA*`.
+
+#### 5. EL BLOQUE DE ASEDIO (`->ASEDIO` ... `<-ASEDIO`)
+
+Todo lo que ocurre durante la "Alerta de Asedio" se escribe dentro de este bloque.
+
+**A) ASEDIO ROTO O CANCELADO**
+El bloque se cierra cuando la amenaza desaparece.
+
+> *Ej:* `Dxd6->ASEDIO Pe7 Cf5 <-ASEDIO`
+
+**B) ASEDIO EJECUTADO (Con consecuencias)**
+Si se confirma, se listan los eventos de **m**azmorra (rescate) y **r**eserva (sacrificio), cerrando con el balance de bajas.
+
+* **Secuencia:** `... ->ASEDIO` + `Defensa` + `(mRescate)` + `(rSacrificio)` + `<-ASEDIO (Balance)`.
+* **Balance:** `(RetornoAtacante | BajasDefensor)`.
+
+> **Ejemplo Completo:**
+> `Dxd6->ASEDIO Pe7 mE rRh6 <-ASEDIO (DEHr EEPBm)`
+> *(Inicio -> Defensa fallida -> Rescate de Elefante -> Sacrificio de Rey -> Fin con retorno de Dragón/Elefante/Chusma y captura de 2 Elefantes/Pesada/Ballesta).*
+
+---
 ---
 
 ### 📜 COTADREZ RULES
