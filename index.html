@@ -325,7 +325,7 @@
             z-index: 20;
         }
 
-        /* --- TABLERO --- */
+        /* --- TABLERO (Añadimos position: relative) --- */
         #board {
             display: grid;
             grid-template-columns: repeat(10, 60px);
@@ -334,6 +334,25 @@
             border-radius: 4px;
             background-color: #2c3e50;
             box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+            position: relative;
+            /* <--- IMPORTANTE: Para posicionar el Easter Egg */
+        }
+
+        /* --- EASTER EGG (Botón Invisible) --- */
+        .debug-egg {
+            position: absolute;
+            bottom: -15px;
+            /* Se sale del contenido para cubrir el borde */
+            right: -15px;
+            /* Se sale del contenido para cubrir el borde */
+            width: 40px;
+            /* Tamaño suficiente para acertar con el ratón */
+            height: 40px;
+            z-index: 1000;
+            /* Por encima de todo */
+            cursor: default;
+            /* Cursor normal para no levantar sospechas */
+            /* background-color: rgba(255,0,0,0.5); <--- Descomenta para ver dónde está mientras pruebas */
         }
 
         /* --- CASILLAS --- */
@@ -562,8 +581,9 @@
     </div>
 
     <footer>
-        <button class="btn-rules" onclick="toggleRules()">📜 Reglas / Rules</button>
+        <button class="btn-rules" onclick="toggleRules()">📜 Reglamento / Rules</button>
     </footer>
+
 
     <div id="rulesModal" class="modal">
         <div class="modal-content">
@@ -965,6 +985,17 @@
                     b.appendChild(tile);
                 }
             }
+
+            // --- EASTER EGG: Botón Invisible de Debug ---
+            const egg = document.createElement('div');
+            egg.className = 'debug-egg';
+            egg.title = "v5.2"; // Pista sutil si dejas el ratón quieto
+
+            // Usamos DOBLE CLICK para evitar accidentes durante la partida
+            egg.ondblclick = () => activateDebugMode();
+
+            b.appendChild(egg);
+
         }
 
         // Devuelve 'north' (filas 0-4) o 'south' (filas 5-9)
@@ -1257,6 +1288,26 @@
                 }
             }
 
+            // --- NUEVO: VALIDACIÓN DE SEGURIDAD EN TIEMPO REAL (GHOSTING) ---
+            // Si técnicamente puedes moverte ahí, comprobamos si es un suicidio.
+            // FIX: Solo simulamos si NO venimos de la reserva y si es válido geométricamente
+            if (isValid && gameState.startsWith('playing') && draggingMeta.source === 'board') {
+                try {
+                    // BLINDAJE: Envolvemos esto en try-catch.
+                    // Si el cálculo de Jaque falla por cualquier bug interno, 
+                    // capturamos el error para que NO congele la barra de estado ni el ghosting.
+                    // Ante la duda (error), asumimos que es seguro (isValid sigue true) para dejar jugar.
+
+                    if (!isSimulatedMoveSafe(type, draggingMeta.originR, draggingMeta.originC, r, c, army)) {
+                        isValid = false;
+                        specialMessage = " (JAQUE ⚠️)";
+                    }
+                } catch (err) {
+                    console.warn("⚠️ Salto de seguridad en DragOver:", err);
+                    // No hacemos nada: isValid se mantiene true, así que se verá VERDE.
+                }
+            }
+
             // =========================================================
             // C. VISUALIZACIÓN FINAL (Común)
             // =========================================================
@@ -1402,6 +1453,14 @@
                         showNotification("⛔ Movimiento ilegal"); return;
                     }
 
+                    // --- NUEVO: VALIDACIÓN DE SEGURIDAD (ANTI-SUICIDIO / OBLIGACIÓN DE SALVAR REY) ---
+                    // Antes de mover, simulamos si esto nos deja en Jaque.
+                    if (!isSimulatedMoveSafe(data.type, data.originR, data.originC, r, c, data.army)) {
+                        const msg = isCheck ? "⚠️ ¡ESTÁS EN JAQUE! Debes salvar al Rey." : "⛔ Movimiento inválido: Dejaría al Rey expuesto.";
+                        showNotification(msg, true);
+                        return; // Cancelamos el movimiento
+                    }
+
                     let wasCapture = false;
 
                     if (target) {
@@ -1485,10 +1544,26 @@
 
                     // --- Bonus Chusma ---
                     if (gameState === 'playing' && data.type === 'chusma' && !wasCapture && gameState !== 'siege-confirmation' && !siegeCreated) {
-                        gameState = 'playing-chusma-bonus';
-                        chusmaMovedCoords = { r: r, c: c };
-                        renderBoard(); updateInventories(); updateDungeons(); checkTurnStatus();
-                        return;
+
+                        // NUEVO: Verificamos si realmente hay OTRA chusma para mover
+                        let totalChusmas = 0;
+                        for (let tr = 0; tr < 10; tr++) {
+                            for (let tc = 0; tc < 10; tc++) {
+                                const p = logicBoard[tr][tc];
+                                if (p && p.army === data.army && p.type === 'chusma') {
+                                    totalChusmas++;
+                                }
+                            }
+                        }
+
+                        // Solo activamos el Bonus si tienes más de 1 chusma (la que moviste + otra)
+                        if (totalChusmas > 1) {
+                            gameState = 'playing-chusma-bonus';
+                            chusmaMovedCoords = { r: r, c: c };
+                            renderBoard(); updateInventories(); updateDungeons(); checkTurnStatus();
+                            return;
+                        }
+                        // Si solo tienes 1, ignoramos el bonus y dejamos que el código siga hacia abajo (cambio de turno)
                     }
                 }
 
@@ -1514,9 +1589,22 @@
                             }
                         }
                     }
+                    // SI LA DEFENSA FALLA (Sigue habiendo 2+ enemigos)
+                    // Esto comprueba correctamente si quedan 2, 3 o 100 enemigos.
+                    // Si eliminaste uno pero quedan 2, entrará aquí correctamente.
                     if (enemiesAtGate >= 2) {
-                        gameState = 'siege-confirmation'; turnColor = attackerArmy;
-                        renderBoard(); updateInventories(); updateDungeons(); updateStatusBar();
+                        gameState = 'siege-confirmation';
+                        turnColor = attackerArmy; // El turno vuelve al atacante
+
+                        // --- CORRECCIÓN QUIRÚRGICA: PRIORIDAD DE ALERTA ---
+                        // Si venimos de una captura, hay una notificación bloqueando la barra.
+                        // La desactivamos a la fuerza para que el aviso de ASEDIO se vea SÍ o SÍ.
+                        isNotificationActive = false;
+                        if (notificationTimer) clearTimeout(notificationTimer);
+                        // --------------------------------------------------
+
+                        renderBoard(); updateInventories(); updateDungeons();
+                        updateStatusBar(); // Ahora sí mostrará "ASEDIO LISTO" en rojo
                         return;
                     }
                 }
@@ -1656,7 +1744,6 @@
 
 
         function finishTurnP2() {
-
             if (reserves[p2Color]['montana'] > 0) {
                 showNotification("⚠️ Debes colocar todas las MONTAÑAS en el mapa antes de empezar.", true);
                 return;
@@ -1666,15 +1753,19 @@
             gameState = 'playing';
             turnColor = p1Color;
 
-            // Feedback visual
-            showNotification(`¡COMIENZA LA PARTIDA! Turno de ${turnColor.toUpperCase()}`);
-
             // Repintar (se quita la niebla)
             renderBoard();
             updateInventories();
 
-            // --- NUEVO: Verificar si empezamos ya en Jaque ---
+            // 1. PRIMERO: Verificamos el estado real (Jaque, Asedios, etc.)
             checkTurnStatus();
+
+            // 2. SEGUNDO: Notificamos SOLO si no hay una emergencia
+            // Si checkTurnStatus detectó Jaque, isCheck será true y updateStatusBar ya habrá puesto el mensaje ROJO.
+            // showNotification respetará eso y no lo sobrescribirá.
+            if (!isCheck) {
+                showNotification(`¡COMIENZA LA PARTIDA! Turno de ${turnColor.toUpperCase()}`);
+            }
         }
 
         function attemptRescue(jailerArmy, captiveIndex, captive) {
@@ -1824,8 +1915,6 @@
             });
         }
 
-        // Valida SOLO la geometría del movimiento (Tablero -> Tablero)
-
         // Valida SOLO la geometría y el camino del movimiento
         function isValidMove(type, r1, c1, r2, c2) {
             const dR = Math.abs(r2 - r1);
@@ -1836,27 +1925,16 @@
             const target = logicBoard[r2][c2];
 
             if (myPiece && target && target.type === 'elefante' && target.army !== myPiece.army) {
-                // A. El Dragón ignora la regla
-                if (type === 'dragon') {
-                    // Pasa
-                }
+                if (type === 'dragon') { /* Pasa */ }
                 else {
-                    // B. LÓGICA SIMPLIFICADA: Total amenazas >= 2
-                    // (Yo cuento como 1, así que necesito a alguien más)
                     const totalThreats = countTotalThreats(r2, c2, myPiece.army);
-
-                    if (totalThreats < 2) {
-                        return false; // Bloqueo visual (Rojo)
-                    }
+                    if (totalThreats < 2) return false;
                 }
             }
-            // --- 1. REY (1 casilla alrededor) ---
+
+            // --- 1. REY ---
             if (type === 'rey') {
-                // NUEVO: No puede moverse a una casilla amenazada (Suicidio)
-                // currentThreatMap se calcula en handleDragStart
-                if (currentThreatMap && currentThreatMap[r2][c2] > 0) {
-                    return false;
-                }
+                if (currentThreatMap && currentThreatMap[r2][c2] > 0) return false;
                 return (dR <= 1 && dC <= 1) && (dR + dC > 0);
             }
             // --- 2. LANCEROS / CHUSMA ---
@@ -1875,13 +1953,14 @@
                 return true;
             }
 
-            // --- 4. ARQUEROS ---
+            // --- 4. ARQUEROS (CORREGIDO: Agua bloquea el salto) ---
             if (type === 'arqueros') {
                 if (dR !== dC) return false;
                 if (dR === 1) return true;
                 if (dR === 2) {
                     if (logicBoard[r2][c2] === null) return false; // Solo salta para matar
                     const midR = (r1 + r2) / 2, midC = (c1 + c2) / 2;
+                    // El agua bloquea el desplazamiento físico de la unidad
                     return (logicBoard[midR][midC] === null && terrain[midR][midC] !== 'water');
                 }
                 return false;
@@ -1893,38 +1972,61 @@
                 const sR = Math.sign(r2 - r1), sC = Math.sign(c2 - c1);
                 let cR = r1 + sR, cC = c1 + sC;
                 while (cR !== r2 || cC !== c2) {
+                    // Bloqueo total por unidades, montañas, fortalezas y agua
                     if (logicBoard[cR][cC] !== null || terrain[cR][cC] === 'water') return false;
                     cR += sR; cC += sC;
                 }
                 return true;
             }
 
-            // --- 6. CABALLERÍA LIGERA ---
+            // --- 6. CABALLERÍA LIGERA (Ruta Dual: 2+1 ó 1+2) ---
             if (type === 'c_ligera') {
                 if (!((dR === 3 && dC === 1) || (dR === 1 && dC === 3))) return false;
-                const isBlocked = (r, c) => {
+
+                const checkBlock = (r, c) => {
                     if (r < 0 || r > 9 || c < 0 || c > 9) return true;
                     if (terrain[r][c] === 'water') return true;
                     const o = logicBoard[r][c];
                     return (o && (o.type === 'montana' || o.type === 'fortaleza'));
                 };
-                // Ruta A (Corto+Giro)
-                const shorts = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
-                for (let [sr, sc] of shorts) {
-                    const cr = r1 + sr, cc = c1 + sc;
-                    if (Math.abs(r2 - cr) === 2 && Math.abs(c2 - cc) === 2) {
-                        if (!isBlocked(cr, cc) && !isBlocked((cr + r2) / 2, (cc + c2) / 2)) return true;
+
+                // RUTA A: Primero salto largo (2), luego corto (1)
+                let pathA_Valid = false;
+                const diags2 = [[2, 2], [2, -2], [-2, 2], [-2, -2]];
+                for (let [kr, kc] of diags2) {
+                    // Buscamos la "rodilla" a distancia 2 del origen que conecte con destino
+                    if (Math.abs(r2 - (r1 + kr)) === 1 && Math.abs(c2 - (c1 + kc)) === 1) {
+                        const kneeR = r1 + kr;
+                        const kneeC = c1 + kc;
+                        const midR = (r1 + kneeR) / 2;
+                        const midC = (c1 + kneeC) / 2;
+
+                        if (!checkBlock(midR, midC) && !checkBlock(kneeR, kneeC)) {
+                            pathA_Valid = true;
+                        }
+                        break;
                     }
                 }
-                // Ruta B (Largo+Giro)
-                const longs = [[2, 2], [2, -2], [-2, 2], [-2, -2]];
-                for (let [lr, lc] of longs) {
-                    const cr = r1 + lr, cc = c1 + lc;
-                    if (Math.abs(r2 - cr) === 1 && Math.abs(c2 - cc) === 1) {
-                        if (!isBlocked((r1 + cr) / 2, (c1 + cc) / 2) && !isBlocked(cr, cc)) return true;
+
+                // RUTA B: Primero salto corto (1), luego largo (2)
+                let pathB_Valid = false;
+                const diags1 = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+                for (let [kr, kc] of diags1) {
+                    // Buscamos la "rodilla" a distancia 1 del origen que conecte con destino
+                    if (Math.abs(r2 - (r1 + kr)) === 2 && Math.abs(c2 - (c1 + kc)) === 2) {
+                        const kneeR = r1 + kr;
+                        const kneeC = c1 + kc;
+                        const midR = (kneeR + r2) / 2;
+                        const midC = (kneeC + c2) / 2;
+
+                        if (!checkBlock(kneeR, kneeC) && !checkBlock(midR, midC)) {
+                            pathB_Valid = true;
+                        }
+                        break;
                     }
                 }
-                return false;
+
+                return (pathA_Valid || pathB_Valid);
             }
 
             // --- 7. CABALLERÍA PESADA ---
@@ -1933,11 +2035,11 @@
                 const myArmy = logicBoard[r1][c1] ? logicBoard[r1][c1].army : null;
                 const isBlocked = (r, c) => {
                     if (r < 0 || r > 9 || c < 0 || c > 9) return true;
-                    if (terrain[r][c] === 'water') return true;
+                    if (terrain[r][c] === 'water') return true; // Agua bloquea
                     const o = logicBoard[r][c];
                     if (o) {
                         if (o.type === 'montana' || o.type === 'fortaleza') return true;
-                        if (o.army !== myArmy) return true;
+                        if (o.army !== myArmy) return true; // Enemigo bloquea
                     }
                     return false;
                 };
@@ -1950,16 +2052,15 @@
             if (type === 'trabuquete') {
                 // A. MOVIMIENTO (Destino vacío): Solo Diagonal 1 casilla
                 if (logicBoard[r2][c2] === null) {
-                    return (dR === 1 && dC === 1);
+                    return (dR === 1 && dC === 1); // El agua se valida fuera (handleDrop)
                 }
-                // B. DISPARO (Destino ocupado): Solo Ortogonal
+                // B. DISPARO: Solo Ortogonal
                 if (r1 !== r2 && c1 !== c2) return false;
-
-                // Raycast: Ignora unidades, bloquea montaña/fortaleza
                 const sR = Math.sign(r2 - r1), sC = Math.sign(c2 - c1);
                 let cR = r1 + sR, cC = c1 + sC;
                 while (cR !== r2 || cC !== c2) {
                     const o = logicBoard[cR][cC];
+                    // Dispara sobre unidades y agua. Solo bloquean Muros.
                     if (o && (o.type === 'montana' || o.type === 'fortaleza')) return false;
                     cR += sR; cC += sC;
                 }
@@ -1972,10 +2073,9 @@
                 if (logicBoard[r2][c2] === null) {
                     return (dR + dC === 1);
                 }
-                // B. DISPARO (Destino ocupado): Solo Diagonal
+                // B. DISPARO: Solo Diagonal
                 if (dR !== dC) return false;
 
-                // Raycast complejo (Perforación)
                 const sR = Math.sign(r2 - r1), sC = Math.sign(c2 - c1);
                 let cR = r1 + sR, cC = c1 + sC;
                 let enemiesInPath = 0;
@@ -1983,36 +2083,36 @@
 
                 while (cR !== r2 || cC !== c2) {
                     const o = logicBoard[cR][cC];
-                    // Bloqueos absolutos
+                    // Bloqueos físicos
                     if (o && (o.type === 'montana' || o.type === 'fortaleza')) return false;
 
-                    // Conteo de enemigos en la trayectoria
-                    if (o && o.army !== logicBoard[r1][c1].army) {
-                        enemiesInPath++;
-                        lastEnemyPos = { r: cR, c: cC };
+                    // Unidades
+                    if (o) {
+                        if (o.army !== logicBoard[r1][c1].army) {
+                            enemiesInPath++;
+                            lastEnemyPos = { r: cR, c: cC };
+                        } else {
+                            // BLOQUEO: No puede atravesar unidades amigas
+                            return false;
+                        }
                     }
-                    // No podemos atravesar aliados
-                    if (o && o.army === logicBoard[r1][c1].army) return false;
+                    // Agua: Se ignora (proyectil vuela sobre ella)
 
                     cR += sR; cC += sC;
                 }
 
                 // Lógica de Perforación
-                if (enemiesInPath === 0) return true; // Disparo directo limpio
+                if (enemiesInPath === 0) return true; // Tiro limpio
                 if (enemiesInPath === 1) {
-                    // Hay uno en medio, ver si cumple condición de "distancia 1 o 2"
-                    // Distancia se mide en huecos vacíos entre unidades.
-                    // Si están pegados (gap 0), distanciaManhattan es 2.
-                    // Si gap es 1, dist es 3. Si gap es 2, dist es 4.
-                    const dist = Math.abs(r2 - lastEnemyPos.r); // Diferencia de filas entre objetivo e intermedio
-                    // dist = 1 (pegados), dist = 2 (1 hueco), dist = 3 (2 huecos)
-                    if (dist >= 1 && dist <= 3) return true; // Aceptamos 0, 1 y 2 huecos de separación
+                    // Distancia entre la víctima intermedia y el objetivo final
+                    const dist = Math.abs(r2 - lastEnemyPos.r);
+                    // Permite hueco de 0, 1 o 2 casillas (ocupadas por agua o vacío)
+                    if (dist >= 1 && dist <= 3) return true;
                 }
-
-                return false; // Más de 1 enemigo o distancia incorrecta
+                return false;
             }
 
-            return true;
+            return false;
         }
 
         function finishChusmaBonusTurn() {
@@ -2036,20 +2136,35 @@
             // 1. Crear matriz vacía de ceros
             let map = Array(10).fill().map(() => Array(10).fill(0));
 
-            // 2. Recorrer tablero buscando atacantes
+            // 2. Identificar al Rey Víctima para hacerlo transparente (Fix Dragon X-Ray)
+            // Si ataca el rojo, la víctima es el negro.
+            const victimArmy = (attackingArmy === 'rojo') ? 'negro' : 'rojo';
+            let kingPos = null;
+
+            // Buscamos al Rey
+            for (let r = 0; r < 10; r++) {
+                for (let c = 0; c < 10; c++) {
+                    const p = logicBoard[r][c];
+                    if (p && p.type === 'rey' && p.army === victimArmy) {
+                        kingPos = { r, c };
+                        break;
+                    }
+                }
+                if (kingPos) break;
+            }
+
+            // 3. Recorrer tablero buscando atacantes
             for (let r = 0; r < 10; r++) {
                 for (let c = 0; c < 10; c++) {
                     const piece = logicBoard[r][c];
                     if (piece && piece.army === attackingArmy) {
 
-                        // 3. Para cada pieza, verificar qué casillas amenaza
                         for (let tr = 0; tr < 10; tr++) {
                             for (let tc = 0; tc < 10; tc++) {
-                                // No se amenaza a sí mismo
                                 if (r === tr && c === tc) continue;
 
-                                // Usamos la función auxiliar de ataque (no de movimiento)
-                                if (canUnitAttack(piece.type, r, c, tr, tc, piece.army)) {
+                                // Pasamos la posición del rey a ignorar (kingPos)
+                                if (canUnitAttack(piece.type, r, c, tr, tc, piece.army, kingPos)) {
                                     map[tr][tc]++;
                                 }
                             }
@@ -2061,70 +2176,75 @@
         }
 
         // Verifica si una unidad en (r1,c1) podría atacar/capturar en (r2,c2)
-        // Ignoramos qué hay en el destino (asumimos que es el objetivo)
-        function canUnitAttack(type, r1, c1, r2, c2, army) {
+        function canUnitAttack(type, r1, c1, r2, c2, army, ignorePos = null) {
             const dR = Math.abs(r2 - r1);
             const dC = Math.abs(c2 - c1);
 
-            // 1. REY, LANCEROS, CHUSMA (Rango 1)
-            // Nota: Asumimos que atacan igual que mueven
             if (type === 'rey') return (dR <= 1 && dC <= 1);
             if (type === 'lanceros' || type === 'chusma') return (dR + dC === 1);
 
-            // 2. ARQUEROS (Distancia 1 o 2 con salto limpio)
             if (type === 'arqueros') {
                 if (dR !== dC) return false;
                 if (dR === 1) return true;
                 if (dR === 2) {
                     const midR = (r1 + r2) / 2, midC = (c1 + c2) / 2;
-                    // Solo atacamos si el hueco intermedio está vacío/agua (sin obstáculos sólidos)
-                    // Nota: logicBoard[mid] debe ser null para que la flecha pase
-                    return (logicBoard[midR][midC] === null && terrain[midR][midC] !== 'water');
+                    const isMidEmpty = (logicBoard[midR][midC] === null || (ignorePos && midR === ignorePos.r && midC === ignorePos.c));
+                    // Agua bloquea ataque de salto
+                    return (isMidEmpty && terrain[midR][midC] !== 'water');
                 }
                 return false;
             }
 
-            // 3. CABALLERÍA LIGERA (Saltos en L diagonal)
+            // --- CABALLERÍA LIGERA (Ruta Dual para Amenazas) ---
             if (type === 'c_ligera') {
                 if (!((dR === 3 && dC === 1) || (dR === 1 && dC === 3))) return false;
-                // Reutilizamos lógica de bloqueo de isValidMove (simplificada)
-                const isBlocked = (r, c) => {
+
+                const checkBlock = (r, c) => {
                     if (r < 0 || r > 9 || c < 0 || c > 9) return true;
+                    if (ignorePos && r === ignorePos.r && c === ignorePos.c) return false;
                     if (terrain[r][c] === 'water') return true;
                     const o = logicBoard[r][c];
                     return (o && (o.type === 'montana' || o.type === 'fortaleza'));
                 };
-                // Check Ruta A
-                const shorts = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
-                for (let [sr, sc] of shorts) {
-                    const cr = r1 + sr, cc = c1 + sc;
-                    if (Math.abs(r2 - cr) === 2 && Math.abs(c2 - cc) === 2) {
-                        if (!isBlocked(cr, cc) && !isBlocked((cr + r2) / 2, (cc + c2) / 2)) return true;
+
+                // RUTA A (2+1)
+                let pathA = false;
+                const diags2 = [[2, 2], [2, -2], [-2, 2], [-2, -2]];
+                for (let [kr, kc] of diags2) {
+                    if (Math.abs(r2 - (r1 + kr)) === 1 && Math.abs(c2 - (c1 + kc)) === 1) {
+                        const kneeR = r1 + kr, kneeC = c1 + kc;
+                        const midR = (r1 + kneeR) / 2, midC = (c1 + kneeC) / 2;
+                        if (!checkBlock(midR, midC) && !checkBlock(kneeR, kneeC)) pathA = true;
+                        break;
                     }
                 }
-                // Check Ruta B
-                const longs = [[2, 2], [2, -2], [-2, 2], [-2, -2]];
-                for (let [lr, lc] of longs) {
-                    const cr = r1 + lr, cc = c1 + lc;
-                    if (Math.abs(r2 - cr) === 1 && Math.abs(c2 - cc) === 1) {
-                        if (!isBlocked((r1 + cr) / 2, (c1 + cc) / 2) && !isBlocked(cr, cc)) return true;
+
+                // RUTA B (1+2)
+                let pathB = false;
+                const diags1 = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+                for (let [kr, kc] of diags1) {
+                    if (Math.abs(r2 - (r1 + kr)) === 2 && Math.abs(c2 - (c1 + kc)) === 2) {
+                        const kneeR = r1 + kr, kneeC = c1 + kc;
+                        const midR = (kneeR + r2) / 2, midC = (kneeC + c2) / 2;
+                        if (!checkBlock(kneeR, kneeC) && !checkBlock(midR, midC)) pathB = true;
+                        break;
                     }
                 }
-                return false;
+
+                return (pathA || pathB);
             }
 
-            // 4. CABALLERÍA PESADA (Saltos en L ortogonal)
+            // --- CABALLERÍA PESADA ---
             if (type === 'c_pesada') {
                 if (!((dR === 2 && dC === 1) || (dR === 1 && dC === 2))) return false;
-                // Bloqueo: Montaña, Fortaleza o ENEMIGO (el amigo deja pasar, el enemigo frena)
-                // Pero para "amenazar" el destino, solo nos importa llegar.
                 const isBlocked = (r, c) => {
                     if (r < 0 || r > 9 || c < 0 || c > 9) return true;
                     if (terrain[r][c] === 'water') return true;
+                    if (ignorePos && r === ignorePos.r && c === ignorePos.c) return false;
                     const o = logicBoard[r][c];
                     if (o) {
                         if (o.type === 'montana' || o.type === 'fortaleza') return true;
-                        if (o.army !== army) return true; // Enemigo bloquea el paso intermedio
+                        if (o.army !== army) return true;
                     }
                     return false;
                 };
@@ -2133,33 +2253,24 @@
                 else return !(isBlocked(r1, c1 + sC) || isBlocked(r1, c2)) || !(isBlocked(r2, c1) || isBlocked(r2, c1 + sC));
             }
 
-            // 5. UNIDADES DE RAYCAST (Dragón, Elefante, Armas)
+            // --- RAYCAST (Dragón, Armas) ---
             const checkRay = (isOrtho, isDiag, canFly, isWeapon) => {
-                // 1. VALIDACIÓN GEOMÉTRICA (Corregida)
                 const validOrtho = (r1 === r2 || c1 === c2);
                 const validDiag = (dR === dC);
+                if (isOrtho && isDiag) { if (!validOrtho && !validDiag) return false; }
+                else if (isOrtho) { if (!validOrtho) return false; }
+                else if (isDiag) { if (!validDiag) return false; }
 
-                if (isOrtho && isDiag) {
-                    // Caso Dragón (Reina): Vale cualquiera de los dos
-                    if (!validOrtho && !validDiag) return false;
-                } else if (isOrtho) {
-                    // Caso Elefante / Trabuquete: Solo ortogonal
-                    if (!validOrtho) return false;
-                } else if (isDiag) {
-                    // Caso Escorpión: Solo diagonal
-                    if (!validDiag) return false;
-                }
-
-                // 2. CÁLCULO DE TRAYECTORIA
                 const sR = Math.sign(r2 - r1);
                 const sC = Math.sign(c2 - c1);
                 let cR = r1 + sR, cC = c1 + sC;
-
                 let enemiesInPath = 0;
                 let lastEnemyPos = null;
 
                 while (cR !== r2 || cC !== c2) {
-                    // ... (El resto del bucle while se queda IGUAL que lo tenías) ...
+                    if (ignorePos && cR === ignorePos.r && cC === ignorePos.c) {
+                        cR += sR; cC += sC; continue;
+                    }
                     const obs = logicBoard[cR][cC];
 
                     if (canFly) {
@@ -2168,12 +2279,11 @@
                         if (terrain[cR][cC] === 'water' && !isWeapon) return false;
                         if (obs) {
                             if (obs.type === 'montana' || obs.type === 'fortaleza') return false;
-
                             if (isWeapon && type === 'escorpion') {
                                 if (obs.army !== army) { enemiesInPath++; lastEnemyPos = { r: cR, c: cC }; }
-                                else return false;
+                                else return false; // Bloqueo amigo
                             } else if (isWeapon && type === 'trabuquete') {
-                                // Ignora unidades
+                                // Ignora
                             } else {
                                 return false;
                             }
@@ -2182,7 +2292,6 @@
                     cR += sR; cC += sC;
                 }
 
-                // ... (Lógica final de Escorpión igual) ...
                 if (type === 'escorpion' && enemiesInPath > 0) {
                     if (enemiesInPath === 1) {
                         const dist = Math.abs(r2 - lastEnemyPos.r);
@@ -2193,12 +2302,10 @@
                 return true;
             };
 
-            if (type === 'dragon') return checkRay(true, true, true, false); // Vuela, Ortho+Diag
-            if (type === 'elefante') return checkRay(true, false, false, false); // Tierra, Ortho
-
-            // -- ARMAS: Solo generan amenaza en su modo de DISPARO --
-            if (type === 'trabuquete') return checkRay(true, false, false, true); // Dispara Ortho
-            if (type === 'escorpion') return checkRay(false, true, false, true); // Dispara Diag
+            if (type === 'dragon') return checkRay(true, true, true, false);
+            if (type === 'elefante') return checkRay(true, false, false, false);
+            if (type === 'trabuquete') return checkRay(true, false, false, true);
+            if (type === 'escorpion') return checkRay(false, true, false, true);
 
             return false;
         }
@@ -2210,8 +2317,7 @@
             const threatMap = getThreatMap(enemy);
             const attackMap = getThreatMap(turnColor);
 
-            // A. DETECCIÓN DE ASEDIO (ESCANEO GLOBAL INDEPENDIENTE)
-            // Reiniciamos el estado
+            // A. DETECCIÓN DE ASEDIO
             siegeStatus.rojo = false;
             siegeStatus.negro = false;
 
@@ -2220,77 +2326,101 @@
                 if (fort) {
                     const attacker = (army === 'rojo') ? 'negro' : 'rojo';
                     let enemiesAtGate = 0;
-
-                    // Escaneamos el anillo de ESTA fortaleza concreta
                     for (let r = 0; r < 10; r++) {
                         for (let c = 0; c < 10; c++) {
                             if (isInExitZone(r, c, fort)) {
                                 const p = logicBoard[r][c];
-                                if (p && p.army === attacker) {
-                                    enemiesAtGate++;
-                                }
+                                if (p && p.army === attacker) enemiesAtGate++;
                             }
                         }
                     }
-                    // Si hay 2+ enemigos, ESTA fortaleza específica está asediada
-                    if (enemiesAtGate >= 2) {
-                        siegeStatus[army] = true;
-                    }
+                    if (enemiesAtGate >= 2) siegeStatus[army] = true;
                 }
             });
 
-            // B. BUSCAR AL REY (Del jugador activo)
+            // B. BUSCAR AL REY
             let kingPos = null;
-            let hasPieces = false;
             for (let r = 0; r < 10; r++) {
                 for (let c = 0; c < 10; c++) {
                     const p = logicBoard[r][c];
-                    if (p && p.army === turnColor) {
-                        hasPieces = true;
-                        if (p.type === 'rey') kingPos = { r, c };
+                    if (p && p.army === turnColor && p.type === 'rey') {
+                        kingPos = { r, c };
+                        break;
                     }
                 }
+                if (kingPos) break;
             }
 
-            if (!kingPos) {
-                isCheck = false;
-                updateStatusBar();
-                return;
-            }
+            if (!kingPos) { isCheck = false; updateStatusBar(); return; }
 
             // 2. DETECCIÓN DE JAQUE
             isCheck = (threatMap[kingPos.r][kingPos.c] > 0);
 
-            // C. ACTUALIZAR INTERFAZ
-            // La prioridad visual se gestiona en updateStatusBar
+            // C. ACTUALIZAR INTERFAZ (Prioridad inmediata)
             updateStatusBar();
 
-            // D. VERIFICAR MOVIMIENTOS LEGALES (MATE / AHOGADO)
+            // D. VERIFICAR SI HAY SALVACIÓN (MATE / AHOGADO)
             currentThreatMap = threatMap;
             currentAttackMap = attackMap;
 
             let hasMoves = false;
 
-            outerLoop:
-            for (let r = 0; r < 10; r++) {
-                for (let c = 0; c < 10; c++) {
-                    const p = logicBoard[r][c];
-                    if (p && p.army === turnColor) {
-                        for (let tr = 0; tr < 10; tr++) {
-                            for (let tc = 0; tc < 10; tc++) {
-                                if (isValidMove(p.type, r, c, tr, tc)) {
-                                    if (terrain[tr][tc] === 'water' && p.type !== 'trabuquete' && p.type !== 'escorpion') continue;
-                                    const target = logicBoard[tr][tc];
-                                    if (target && target.army === turnColor && p.type !== 'lanceros') continue;
-                                    if (target && (target.type === 'montana' || target.type === 'fortaleza')) continue;
+            try {
+                // BUSCAMOS CUALQUIER MOVIMIENTO QUE SALVE AL REY
+                // Recorremos todas nuestras piezas
+                outerLoop:
+                for (let r = 0; r < 10; r++) {
+                    for (let c = 0; c < 10; c++) {
+                        const p = logicBoard[r][c];
+                        if (p && p.army === turnColor) {
 
-                                    hasMoves = true;
-                                    break outerLoop;
+                            // Probamos todos los destinos posibles
+                            for (let tr = 0; tr < 10; tr++) {
+                                for (let tc = 0; tc < 10; tc++) {
+
+                                    // 1. ¿Es un movimiento geométricamente válido?
+                                    if (isValidMove(p.type, r, c, tr, tc)) {
+
+                                        // Filtros básicos de terreno/ocupación
+                                        if (terrain[tr][tc] === 'water' && p.type !== 'trabuquete' && p.type !== 'escorpion') continue;
+                                        const target = logicBoard[tr][tc];
+                                        if (target && target.army === turnColor && p.type !== 'lanceros') continue;
+                                        if (target && (target.type === 'montana' || target.type === 'fortaleza')) continue;
+
+                                        // 2. SIMULACIÓN DE SEGURIDAD (EL JUEZ FINAL)
+                                        // Realizamos el movimiento en el tablero lógico temporalmente
+                                        const originalSource = logicBoard[r][c];
+                                        const originalTarget = logicBoard[tr][tc];
+
+                                        logicBoard[r][c] = null;
+                                        logicBoard[tr][tc] = originalSource;
+
+                                        // RE-CALCULAMOS: ¿Sigue el Rey en jaque en este futuro hipotético?
+                                        // Nota: Si movimos al Rey, su posición ha cambiado a (tr, tc)
+                                        let simKingR = (p.type === 'rey') ? tr : kingPos.r;
+                                        let simKingC = (p.type === 'rey') ? tc : kingPos.c;
+
+                                        // Usamos getAttackers que lee el tablero modificado (con el bloqueo/captura aplicado)
+                                        const threats = getAttackers(simKingR, simKingC, turnColor);
+                                        const isSuicide = (threats.length > 0);
+
+                                        // Deshacemos el movimiento (Revertir)
+                                        logicBoard[r][c] = originalSource;
+                                        logicBoard[tr][tc] = originalTarget;
+
+                                        if (!isSuicide) {
+                                            hasMoves = true;
+                                            break outerLoop; // ¡Encontramos al menos una salida! No es Mate.
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            } catch (err) {
+                console.error("Error cálculo Mate:", err);
+                hasMoves = true; // Ante la duda, dejar jugar
             }
 
             // E. RESOLUCIÓN DE PARTIDA
@@ -2315,6 +2445,13 @@
 
         // Actualiza la barra de estado gestionando prioridades y colores
         function showNotification(msg, isError = false) {
+            // SI HAY EMERGENCIA (Jaque/Asedio), NO mostramos notificaciones triviales.
+            // Forzamos updateStatusBar por si acaso, y salimos.
+            if (isCheck || siegeStatus[turnColor] === true || gameState === 'siege-resolution' || gameState === 'siege-confirmation') {
+                updateStatusBar();
+                return;
+            }
+
             const bar = document.getElementById('status-bar');
 
             // 1. ACTIVAR BLOQUEO DE ESTADO
@@ -2324,11 +2461,9 @@
             bar.classList.remove('status-critical');
             bar.style.color = isError ? '#e74c3c' : '#f1c40f';
 
-            // Animación suave
             bar.style.opacity = 0;
             setTimeout(() => bar.style.opacity = 1, 50);
 
-            // 2. GESTIÓN DEL TEMPORIZADOR (Reiniciar si ya había uno)
             if (notificationTimer) clearTimeout(notificationTimer);
 
             notificationTimer = setTimeout(() => {
@@ -2342,15 +2477,7 @@
         function updateStatusBar() {
             const bar = document.getElementById('status-bar');
 
-            // Si hay una notificación temporal activa (ej: "No puedes mover ahí"), no la tocamos
-            if (isNotificationActive) return;
-
-            // 1. Obtenemos el texto según la jerarquía del Paso 2
-            const text = getStatusText();
-            bar.innerText = text;
-
-            // 2. Determinamos si es una situación CRÍTICA para ponerlo en ROJO/PARPADEANTE
-            // (Jaque, Asedio Resolución, Asedio Confirmación, Alerta de Asedio)
+            // 1. Calculamos PRIMERO si la situación actual es CRÍTICA
             const isCritical = (
                 gameState === 'siege-resolution' ||
                 gameState === 'siege-confirmation' ||
@@ -2359,17 +2486,30 @@
                 isCheck
             );
 
-            // 3. Aplicamos estilos
+            // 2. FILTRO DE PRIORIDAD:
+            // Si hay una notificación temporal activa (ej: "¡Captura!")...
+            // ...SOLO la respetamos si NO estamos en una situación crítica.
+            // Si es crítica (Jaque/Asedio), ignoramos el bloqueo y sobrescribimos el mensaje inmediatamente.
+            if (isNotificationActive && !isCritical) return;
+
+            // 3. Obtenemos el texto según la jerarquía
+            const text = getStatusText();
+            bar.innerText = text;
+
+            // 4. Aplicamos estilos
             if (isCritical) {
                 bar.classList.add('status-critical'); // Clase CSS con animación roja
                 bar.style.color = '#ff2e2e'; // Aseguramos rojo
+
+                // Si acabamos de sobrescribir una notificación temporal, nos aseguramos de que se vea
+                bar.style.opacity = 1;
             } else {
                 bar.classList.remove('status-critical');
-                // Si es bonus de chusma, color especial (Cyan o Dorado), si no, Dorado estándar
+                // Si es bonus de chusma, color especial (Cyan), si no, Dorado estándar
                 if (gameState === 'playing-chusma-bonus') {
-                    bar.style.color = '#3498db'; // Azul claro para diferenciar
+                    bar.style.color = '#3498db';
                 } else {
-                    bar.style.color = 'var(--c-gold)'; // Color normal
+                    bar.style.color = 'var(--c-gold)';
                 }
             }
 
@@ -2627,6 +2767,185 @@
                 }
             }
             return threats;
+        }
+
+        // Devuelve una lista con las coordenadas y tipo de los enemigos que atacan (r, c)
+        function getAttackers(targetR, targetC, victimArmy) {
+            const attackers = [];
+            const enemyArmy = (victimArmy === 'rojo') ? 'negro' : 'rojo';
+
+            for (let r = 0; r < 10; r++) {
+                for (let c = 0; c < 10; c++) {
+                    const p = logicBoard[r][c];
+                    if (p && p.army === enemyArmy) {
+                        // Check rápido: ¿Esta pieza enemiga amenaza mi casilla?
+                        if (canUnitAttack(p.type, r, c, targetR, targetC, enemyArmy)) {
+                            attackers.push({ r: r, c: c, type: p.type });
+                        }
+                    }
+                }
+            }
+            return attackers;
+        }
+
+        // Simula un movimiento para ver si deja al Rey en Jaque (Suicidio)
+        function isSimulatedMoveSafe(pieceType, r1, c1, r2, c2, army) {
+            // 1. Identificar dónde está el Rey
+            let kingR, kingC;
+
+            if (pieceType === 'rey') {
+                kingR = r2; kingC = c2;
+            } else {
+                for (let r = 0; r < 10; r++) {
+                    for (let c = 0; c < 10; c++) {
+                        const p = logicBoard[r][c];
+                        if (p && p.type === 'rey' && p.army === army) {
+                            kingR = r; kingC = c; break;
+                        }
+                    }
+                }
+            }
+
+            // Si no hay rey, no hay jaque (seguro)
+            if (kingR === undefined) return true;
+
+            // VARIABLES PARA REVERTIR
+            // Usamos lógica defensiva por si r2/c2 vinieran mal
+            const originalTarget = (logicBoard[r2] && logicBoard[r2][c2]) ? logicBoard[r2][c2] : null;
+            let originalSource = null;
+            let sourceCleared = false;
+
+            try {
+                // 2. APLICAR MOVIMIENTO SIMULADO
+                if (r1 !== null && r1 !== undefined && c1 !== null && c1 !== undefined) {
+                    originalSource = logicBoard[r1][c1];
+
+                    // Si la casilla origen está vacía (bug raro), abortamos
+                    if (!originalSource) return true;
+
+                    logicBoard[r1][c1] = null;
+                    sourceCleared = true;
+                    logicBoard[r2][c2] = originalSource;
+                } else {
+                    // Caso Reserva (aunque handleDragOver ya lo filtra, lo dejamos por robustez)
+                    logicBoard[r2][c2] = { type: pieceType, army: army };
+                }
+
+                // 3. VERIFICAR AMENAZAS
+                const attackers = getAttackers(kingR, kingC, army);
+                return (attackers.length === 0);
+
+            } catch (e) {
+                console.error("Error simulación:", e);
+                return true; // Ante error, permitimos el movimiento
+            } finally {
+                // 4. REVERTIR SIEMPRE
+                if (sourceCleared && r1 !== null && c1 !== null) {
+                    logicBoard[r1][c1] = originalSource;
+                }
+                logicBoard[r2][c2] = originalTarget;
+            }
+        }
+
+        // =========================================================
+        //  MODO DEBUG: DESPLIEGUE ALEATORIO AUTOMÁTICO (CORREGIDO)
+        // =========================================================
+        function activateDebugMode() {
+            if (!confirm("⚠️ ¿ACTIVAR MODO DEBUG?\nSe reiniciará la partida con despliegue aleatorio legal.")) return;
+
+            console.log("🛠️ Ejecutando Despliegue Aleatorio...");
+
+            init();
+            logicBoard = Array(10).fill().map(() => Array(10).fill(null));
+            fortressPos = { rojo: null, negro: null };
+            dungeons = { rojo: [], negro: [] };
+            shotHighlights = [];
+
+            p1Color = 'rojo'; p1Territory = 'north';
+            p2Color = 'negro';
+
+            // 1. COLOCAR FORTALEZAS (Reglas estrictas de bordes)
+            // Norte (Rojo): Filas permitidas para la esquina superior-izq: 1 ó 2 (para no tocar 0 ni 4)
+            // Sur (Negro): Filas permitidas: 6 ó 7 (para no tocar 5 ni 9)
+            // Columnas permitidas: 1 a 7 (para no tocar 0 ni 9 con el ancho 2)
+
+            const validRowsNorth = [1, 2];
+            const validRowsSouth = [6, 7];
+
+            const placeFortress = (army, validRows) => {
+                const r = validRows[Math.floor(Math.random() * validRows.length)];
+                const c = Math.floor(Math.random() * 7) + 1; // 1 a 7
+
+                logicBoard[r][c] = { army, type: 'fortaleza' };
+                logicBoard[r][c + 1] = { army, type: 'fortaleza' };
+                logicBoard[r + 1][c] = { army, type: 'fortaleza' };
+                logicBoard[r + 1][c + 1] = { army, type: 'fortaleza' };
+                fortressPos[army] = { r, c };
+                reserves[army]['fortaleza'] = 0;
+            };
+
+            placeFortress('rojo', validRowsNorth);
+            placeFortress('negro', validRowsSouth);
+
+            // 2. COLOCAR TROPAS (Solo en Anillo de Salida)
+            const placeTroops = (army) => {
+                const fort = fortressPos[army];
+                // Identificar todas las casillas válidas del anillo
+                let validSpots = [];
+                for (let r = 0; r < 10; r++) {
+                    for (let c = 0; c < 10; c++) {
+                        if (isInExitZone(r, c, fort) && logicBoard[r][c] === null && terrain[r][c] !== 'water') {
+                            validSpots.push({ r, c });
+                        }
+                    }
+                }
+
+                // Barajar posiciones
+                validSpots.sort(() => Math.random() - 0.5);
+
+                // Colocar unidades hasta llenar huecos o vaciar reserva
+                for (const [type, count] of Object.entries(reserves[army])) {
+                    if (type === 'montana') continue; // Las montañas van aparte
+                    let qty = count;
+                    while (qty > 0 && validSpots.length > 0) {
+                        const spot = validSpots.pop();
+                        logicBoard[spot.r][spot.c] = { army, type };
+                        reserves[army][type]--;
+                        qty--;
+                    }
+                }
+            };
+
+            placeTroops('rojo');
+            placeTroops('negro');
+
+            // 3. COLOCAR MONTAÑAS (En cualquier lugar libre de su territorio)
+            const placeMountains = (army, minR, maxR) => {
+                let qty = reserves[army]['montana'];
+                let attempts = 0;
+                while (qty > 0 && attempts < 100) {
+                    const r = Math.floor(Math.random() * (maxR - minR + 1)) + minR;
+                    const c = Math.floor(Math.random() * 10);
+                    if (logicBoard[r][c] === null && terrain[r][c] !== 'water') {
+                        logicBoard[r][c] = { army, type: 'montana' };
+                        reserves[army]['montana']--;
+                        qty--;
+                    }
+                    attempts++;
+                }
+            };
+
+            placeMountains('rojo', 0, 4);
+            placeMountains('negro', 5, 9);
+
+            // Iniciar
+            gameState = 'playing';
+            turnColor = 'rojo';
+
+            showNotification("🛠️ MODO DEBUG: Despliegue Legal Completado");
+            renderBoard();
+            updateInventories();
+            checkTurnStatus();
         }
 
     </script>
